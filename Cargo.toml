@@ -9,7 +9,6 @@ documentation = "https://github.com/medbioinf/loop-rs"
 license-file = "LICENSE"
 
 [dependencies]
-kd-tree = "0.6.0"
 kdtree = "0.7.0"
 ndarray = "0.16.1"
 num-traits = "0.2.19"
