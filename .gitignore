@@ -1,0 +1,4 @@
+/target
+*.py
+!/render_test.py
+/test.tsv
