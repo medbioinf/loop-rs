@@ -15,4 +15,5 @@ num-traits = "0.2.19"
 thiserror = "2.0.12"
 
 [dev-dependencies]
+ndarray-stats = "0.6.0"
 polars = { version = "0.47.1", features = ["ndarray"] }

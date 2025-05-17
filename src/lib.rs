@@ -228,6 +228,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use ndarray_stats::DeviationExt;
     use polars::prelude::*;
 
     #[test]
@@ -259,34 +260,17 @@ mod tests {
 
         assert_eq!(loop_score.len(), df.height());
 
-        // TODO: Comparison strategy.
-        //   The calculated score is not exactly the same.
-        //   It seems there are some rounding errors in the calculation.
-        //   Also possible the used KDTree implementation is not exactly the same or the error function approximation.
+        let loop_score_py = df
+            .column("loop_score")
+            .unwrap()
+            .f64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect::<Array1<_>>();
 
-        // let precalculated_loop_score = df
-        //     .select(["loop_score"])
-        //     .unwrap()
-        //     .to_ndarray::<Float64Type>(IndexOrder::C)
-        //     .unwrap();
+        let rmse = loop_score.root_mean_sq_err(&loop_score_py).unwrap();
 
-        // for (calc, precalc) in loop_score.iter().zip(precalculated_loop_score.iter()) {
-        //     assert!((calc - precalc).abs() < 0.0001);
-        // }
-
-        // Write the calculated loop score to a new column in the DataFrame
-        // and use the `render_test.py` to compare the results visually for now.
-        let mut loop_df = df.select(["xcorr", "loop_score"]).unwrap();
-        loop_df
-            .with_column(Series::new("loop_score_rust".into(), loop_score.to_vec()))
-            .unwrap();
-
-        CsvWriter::new(std::fs::File::create("./test.tsv").unwrap())
-            .include_header(true)
-            .with_separator(b'\t')
-            .finish(&mut loop_df)
-            .unwrap();
-
-        println!("Run `python render_test.py` to compare the results visually for now. (`plotly`, `polars` are needed)");
+        // RMSE under 0.02 should be good enough
+        assert!(rmse < 0.02, "RMSE: {}", rmse);
     }
 }
