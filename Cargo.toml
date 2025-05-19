@@ -1,5 +1,5 @@
 [package]
-name = "local_outlier_probabilities"
+name = "local-outlier-probabilities"
 version = "1.0.0"
 edition = "2021"
 description = "Local Outlier Probabilities (LoOP) calculation"

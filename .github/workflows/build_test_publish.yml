@@ -1,0 +1,50 @@
+name: Rust
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - name: Build
+        id: build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --verbose
+
+      - name: Test
+        id: test
+        if: steps.build.outcome == 'success'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --release --verbose
+
+      - name: Publish
+        if: steps.test.outcome == 'success' && github.event_name != 'pull_request'
+        run : cargo publish --token ${CRATESIO_TOKEN}
+        env:
+          CRATESIO_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
