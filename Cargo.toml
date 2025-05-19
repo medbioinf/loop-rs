@@ -5,7 +5,7 @@ edition = "2021"
 description = "Local Outlier Probabilities (LoOP) calculation"
 repository = "https://github.com/medbioinf/loop-rs"
 homepage = "https://github.com/medbioinf/loop-rs"
-documentation = "https://github.com/medbioinf/loop-rs"
+documentation = "https://docs.rs/local-outlier-probabilities"
 license-file = "LICENSE"
 readme = "Readme.md"
 
