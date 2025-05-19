@@ -99,7 +99,7 @@ where
     }
 
     // Build the neighbor list. We need to manually remove the queried point from the list of neighbors
-    // therefore the map()-part is a bit more complicated and we increase the k by 1
+    // therefore the map()-part is a bit more complicated and we increase the `k by 1
     let neighbors_list = point_refs
         .iter()
         .enumerate()
@@ -192,11 +192,8 @@ fn calc_nplof<T>(plofs: &Array1<T>, lambda: T) -> T
 where
     T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
 {
-    let mut plofs_squared = T::zero();
-    for plof in plofs.iter() {
-        plofs_squared += *plof * *plof;
-    }
-    let plofs_squared_mean = plofs_squared / T::from(plofs.len()).unwrap();
+    let plofs_squared_mean =
+        plofs.iter().map(|x| x.powi(2)).sum::<T>() / T::from(plofs.len()).unwrap();
 
     lambda * plofs_squared_mean.sqrt()
 }
