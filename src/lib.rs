@@ -99,7 +99,7 @@ where
     }
 
     // Build the neighbor list. We need to manually remove the queried point from the list of neighbors
-    // therefore the map()-part is a bit more complicated
+    // therefore the map()-part is a bit more complicated and we increase the k by 1
     let neighbors_list = point_refs
         .iter()
         .enumerate()
@@ -271,6 +271,6 @@ mod tests {
         let rmse = loop_score.root_mean_sq_err(&loop_score_py).unwrap();
 
         // RMSE under 0.02 should be good enough
-        assert!(rmse < 0.02, "RMSE: {}", rmse);
+        assert!(rmse < 0.02, "RMSE > 0.02");
     }
 }
