@@ -1,12 +1,13 @@
 [package]
 name = "local-outlier-probabilities"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Local Outlier Probabilities (LoOP) calculation"
 repository = "https://github.com/medbioinf/loop-rs"
 homepage = "https://github.com/medbioinf/loop-rs"
 documentation = "https://github.com/medbioinf/loop-rs"
 license-file = "LICENSE"
+readme = "Readme.md"
 
 [dependencies]
 kdtree = "0.7.0"
