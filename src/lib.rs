@@ -122,9 +122,9 @@ where
         .collect::<Result<Vec<Vec<(T, &usize)>>, Error>>()?;
 
     // Let's prepare some to Floats to work with
-    let k_float = T::from(k).ok_or(Error::KCastingError("k".to_string()))?;
-    let lambda_float = T::from(lambda).ok_or(Error::KCastingError("lambda".to_string()))?;
-    let two_squared = T::from(2.0).ok_or(Error::KCastingError("2.0".to_string()))?;
+    let k_float = T::from(k).ok_or(Error::CastingError("k".to_string()))?;
+    let lambda_float = T::from(lambda).ok_or(Error::CastingError("lambda".to_string()))?;
+    let two_squared = T::from(2.0).ok_or(Error::CastingError("2.0".to_string()))?;
 
     // Calculate the probabilistic distance for each point
     let pdists = neighbors_list

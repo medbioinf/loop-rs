@@ -7,5 +7,5 @@ pub enum Error {
     #[error("KDTree error: {0}")]
     KdTreeError(#[from] kdtree::ErrorKind),
     #[error("Could not convert `{0}` to Float.")]
-    KCastingError(String),
+    CastingError(String),
 }
