@@ -10,6 +10,7 @@ use std::ops::AddAssign;
 use kdtree::KdTree;
 use ndarray::{Array1, Array2, ScalarOperand};
 use num_traits::{Float, FloatConst};
+use rayon::prelude::*;
 
 use crate::error::Error;
 
@@ -67,18 +68,28 @@ where
 /// * `k` - Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug of nearest neighbors to consider
 /// * `lambda` - Scaling factor for the probabilistic set distance & Probabilistic Local Outlier (PLod)
 /// * `distance_fn` - Optional distance function to use (default is Manhattan distance)
+/// * `threads` - Optional number of threads to use (default is 1, 0 == auto-detect by Rayon)
 ///
 pub fn local_outlier_probabilities<T>(
-    data: Array2<T>,
+    data: &Array2<T>,
     k: usize,
     lambda: u8,
     distance_fn: Option<DistanceFn<T>>,
+    threads: Option<usize>,
 ) -> Result<Array1<T>, Error>
 where
-    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
+    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug + Sync + Send,
 {
     // Unwrap the distance function or use the default
     let distance_fn = distance_fn.unwrap_or(manhattan);
+
+    // Set the number of threads to use
+    let threads = threads.unwrap_or(1);
+
+    let thread_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(Error::CreateThreadPoolError)?;
 
     // Build the KDTree for finding nearest neighbors
     let mut tree = KdTree::new(data.shape()[1]);
@@ -100,26 +111,28 @@ where
 
     // Build the neighbor list. We need to manually remove the queried point from the list of neighbors
     // therefore the map()-part is a bit more complicated and we increase the `k by 1
-    let neighbors_list = point_refs
-        .iter()
-        .enumerate()
-        .map(|(point_idx, point)| {
-            match tree.nearest(point, k + 1, &distance_fn) {
-                Ok(neighbors) => {
-                    // kdtree::nearest includes the point itself, so we need to add 1 to k and remove the point
-                    let filtered = neighbors
-                        .into_iter()
-                        .filter(|neighbor| {
-                            // filter out the point itself
-                            *neighbor.1 != point_idx
-                        })
-                        .collect::<Vec<_>>();
-                    Ok(filtered)
+    let neighbors_list = thread_pool.install(|| {
+        point_refs
+            .par_iter()
+            .enumerate()
+            .map(|(point_idx, point)| {
+                match tree.nearest(point, k + 1, &distance_fn) {
+                    Ok(neighbors) => {
+                        // kdtree::nearest includes the point itself, so we need to add 1 to k and remove the point
+                        let filtered = neighbors
+                            .into_iter()
+                            .filter(|neighbor| {
+                                // filter out the point itself
+                                *neighbor.1 != point_idx
+                            })
+                            .collect::<Vec<_>>();
+                        Ok(filtered)
+                    }
+                    Err(err) => Err(Error::KdTreeError(err)),
                 }
-                Err(err) => Err(Error::KdTreeError(err)),
-            }
-        })
-        .collect::<Result<Vec<Vec<(T, &usize)>>, Error>>()?;
+            })
+            .collect::<Result<Vec<Vec<(T, &usize)>>, Error>>()
+    })?;
 
     // Let's prepare some to Floats to work with
     let k_float = T::from(k).ok_or(Error::CastingError("k".to_string()))?;
@@ -127,11 +140,14 @@ where
     let two_squared = T::from(2.0).ok_or(Error::CastingError("2.0".to_string()))?;
 
     // Calculate the probabilistic distance for each point
-    let pdists = neighbors_list
-        .iter()
-        .map(|neighbors| calc_sigma(neighbors, k_float))
-        .collect::<Array1<_>>()
-        * lambda_float;
+    let pdists = thread_pool.install(|| {
+        Array1::from(
+            neighbors_list
+                .par_iter()
+                .map(|neighbors| calc_sigma(neighbors, k_float))
+                .collect::<Vec<_>>(),
+        ) * lambda_float
+    });
 
     // Calculate the Probabilistic Outlier Factor for each point
     let plofs = neighbors_list
@@ -253,9 +269,13 @@ mod tests {
         let array = feature_df.to_ndarray::<Float64Type>(IndexOrder::C).unwrap();
 
         // Calculate the local outlier probabilities
-        let loop_score = local_outlier_probabilities(array, 1000, 3, None).unwrap();
+        let loop_score = local_outlier_probabilities(&array, 1000, 3, None, None).unwrap();
+
+        // Calculate the local outlier probabilities in parallel
+        let loop_score_par = local_outlier_probabilities(&array, 1000, 3, None, Some(0)).unwrap();
 
         assert_eq!(loop_score.len(), df.height());
+        assert_eq!(loop_score_par.len(), df.height());
 
         let loop_score_py = df
             .column("loop_score")
@@ -269,5 +289,12 @@ mod tests {
 
         // RMSE under 0.02 should be good enough
         assert!(rmse < 0.02, "RMSE > 0.02");
+
+        let rmse = loop_score_par.root_mean_sq_err(&loop_score_py).unwrap();
+        // RMSE under 0.02 should be good enough
+        assert!(
+            rmse < 0.02,
+            "RMSE for parallel calculated loop score > 0.02"
+        );
     }
 }

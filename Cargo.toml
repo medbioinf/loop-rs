@@ -11,10 +11,11 @@ readme = "Readme.md"
 
 [dependencies]
 kdtree = "0.7.0"
-ndarray = "0.16.1"
+ndarray = { version = "0.16.1", features = ["rayon"]}
 num-traits = "0.2.19"
+rayon = "1.11.0"
 thiserror = "2.0.12"
 
 [dev-dependencies]
 ndarray-stats = "0.6.0"
-polars = { version = "0.47.1", features = ["ndarray"] }
+polars = { version = "0.47.1", features = ["ndarray", "parquet"] }

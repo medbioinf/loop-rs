@@ -8,4 +8,6 @@ pub enum Error {
     KdTreeError(#[from] kdtree::ErrorKind),
     #[error("Could not convert `{0}` to Float.")]
     CastingError(String),
+    #[error("Could not create thread pool: {0}")]
+    CreateThreadPoolError(rayon::ThreadPoolBuildError),
 }
