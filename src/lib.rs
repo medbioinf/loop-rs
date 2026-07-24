@@ -3,22 +3,91 @@
 
 pub mod error;
 
+use std::borrow::Cow;
 use std::fmt::Debug;
 use std::iter::Sum;
 use std::ops::AddAssign;
 
 use kdtree::KdTree;
-use ndarray::{Array1, Array2, ScalarOperand};
 use num_traits::{Float, FloatConst};
 
 use crate::error::Error;
+
+/// A source of points that can be queried by index, without requiring the caller
+/// to convert their data into a specific owned container first.
+///
+/// A blanket implementation is provided for `[R] where R: AsRef<[T]>` (covers
+/// `Vec<Vec<T>>`, `&[[T; M]]`, etc.), which borrows every point at zero cost.
+/// To feed in a type from another crate (e.g. `ndarray::Array2<T>`) without adding
+/// that crate as a dependency here, implement this trait for a thin wrapper around
+/// it in your own code, e.g.:
+///
+/// ```ignore
+/// struct NdarrayPoints<'a, T>(&'a ndarray::Array2<T>);
+///
+/// impl<'a, T: Clone> PointSource<T> for NdarrayPoints<'a, T> {
+///     fn len(&self) -> usize {
+///         self.0.nrows()
+///     }
+///     fn dim(&self) -> usize {
+///         self.0.ncols()
+///     }
+///     fn point(&self, idx: usize) -> Result<std::borrow::Cow<'_, [T]>, Error> {
+///         // `Array2::row` is a zero-copy view; `to_slice` only fails for non-contiguous arrays.
+///         let row = self.0.row(idx);
+///         Ok(std::borrow::Cow::Borrowed(row.to_slice().expect("contiguous row")))
+///     }
+/// }
+/// ```
+#[allow(clippy::len_without_is_empty)]
+pub trait PointSource<T: Clone> {
+    /// Number of points.
+    fn len(&self) -> usize;
+    /// Number of dimensions every point is expected to have.
+    fn dim(&self) -> usize;
+    /// Borrow (or, if the underlying storage isn't row-major, gather) the point at `idx`.
+    fn point(&self, idx: usize) -> Result<Cow<'_, [T]>, Error>;
+}
+
+impl<T: Clone, R> PointSource<T> for [R]
+where
+    R: AsRef<[T]>,
+{
+    fn len(&self) -> usize {
+        <[R]>::len(self)
+    }
+
+    fn dim(&self) -> usize {
+        self.first().map(|row| row.as_ref().len()).unwrap_or(0)
+    }
+
+    fn point(&self, idx: usize) -> Result<Cow<'_, [T]>, Error> {
+        Ok(Cow::Borrowed(self[idx].as_ref()))
+    }
+}
+
+impl<T: Clone, R> PointSource<T> for Vec<R>
+where
+    R: AsRef<[T]>,
+{
+    fn len(&self) -> usize {
+        PointSource::<T>::len(self.as_slice())
+    }
+
+    fn dim(&self) -> usize {
+        PointSource::<T>::dim(self.as_slice())
+    }
+
+    fn point(&self, idx: usize) -> Result<Cow<'_, [T]>, Error> {
+        PointSource::<T>::point(self.as_slice(), idx)
+    }
+}
 
 /// Type alias for distance function
 /// Due to the kdtree implementation we can not return a Error in case the dimensions do not match
 ///
 #[allow(type_alias_bounds)]
-pub type DistanceFn<T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug> =
-    fn(&[T], &[T]) -> T;
+pub type DistanceFn<T: Float + FloatConst + AddAssign + Sum + Debug> = fn(&[T], &[T]) -> T;
 
 /// Manhattan distance
 ///
@@ -28,7 +97,7 @@ pub type DistanceFn<T: Float + FloatConst + ScalarOperand + AddAssign + Sum + De
 ///
 pub fn manhattan<T>(a: &[T], b: &[T]) -> T
 where
-    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
+    T: Float + FloatConst + AddAssign + Sum + Debug,
 {
     debug_assert_eq!(a.len(), b.len());
     a.iter()
@@ -45,7 +114,7 @@ where
 ///
 pub fn euclidean<T>(a: &[T], b: &[T]) -> T
 where
-    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
+    T: Float + FloatConst + AddAssign + Sum + Debug,
 {
     debug_assert_eq!(a.len(), b.len());
     a.iter()
@@ -62,37 +131,55 @@ where
 /// > 'CIKM' , ACM, , pp. 1649-1652 .
 ///
 /// # Arguments
-/// * `data` - 2D array of data points N x M (N rows & M columns).
-///   **It is important to note that the data is expected to be in contiguous memory.**
-/// * `k` - Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug of nearest neighbors to consider
+/// * `data` - Any [`PointSource`], N points of M dimensions each (all points must have the
+///   same dimension). A blanket impl covers `&[R] where R: AsRef<[T]>` (e.g. `&[Vec<T>]`) for free;
+///   implement `PointSource` for your own wrapper to support other containers without converting them.
+/// * `k` - Number of nearest neighbors to consider
 /// * `lambda` - Scaling factor for the probabilistic set distance & Probabilistic Local Outlier (PLod)
 /// * `distance_fn` - Optional distance function to use (default is Manhattan distance)
 ///
-pub fn local_outlier_probabilities<T>(
-    data: Array2<T>,
+pub fn local_outlier_probabilities<T, S>(
+    data: &S,
     k: usize,
     lambda: u8,
     distance_fn: Option<DistanceFn<T>>,
-) -> Result<Array1<T>, Error>
+) -> Result<Vec<T>, Error>
 where
-    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
+    T: Float + FloatConst + AddAssign + Sum + Debug,
+    S: PointSource<T> + ?Sized,
 {
     // Unwrap the distance function or use the default
     let distance_fn = distance_fn.unwrap_or(manhattan);
 
-    // Build the KDTree for finding nearest neighbors
-    let mut tree = KdTree::new(data.shape()[1]);
+    if data.len() == 0 {
+        return Err(Error::EmptyInput);
+    }
+    let dim = data.dim();
 
-    // Get and array of references to the underlying data in the array
-    // and add them to the KDTree. This should safe some memory on larger features arrays
-    let point_refs = data
-        .outer_iter()
-        .map(|point| {
-            point
-                .to_slice()
-                .ok_or(Error::SliceNotContiguous("collecting points references"))
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    // Borrow (or gather) every point once up front
+    let points = (0..data.len())
+        .map(|idx| data.point(idx))
+        .collect::<Result<Vec<Cow<'_, [T]>>, Error>>()?;
+
+    for (row, point) in points.iter().enumerate() {
+        if point.len() != dim {
+            return Err(Error::DimensionMismatch {
+                expected: dim,
+                found: point.len(),
+                row,
+            });
+        }
+    }
+
+    // Build the KDTree for finding nearest neighbors
+    let mut tree = KdTree::new(dim);
+
+    // Get an array of references to the underlying points and add them to the KDTree.
+    // This should safe some memory on larger features arrays
+    let point_refs = points
+        .iter()
+        .map(|point| point.as_ref())
+        .collect::<Vec<_>>();
 
     for (idx, point) in point_refs.iter().enumerate() {
         tree.add(*point, idx)?;
@@ -129,23 +216,24 @@ where
     // Calculate the probabilistic distance for each point
     let pdists = neighbors_list
         .iter()
-        .map(|neighbors| calc_sigma(neighbors, k_float))
-        .collect::<Array1<_>>()
-        * lambda_float;
+        .map(|neighbors| calc_sigma(neighbors, k_float) * lambda_float)
+        .collect::<Vec<T>>();
 
     // Calculate the Probabilistic Outlier Factor for each point
     let plofs = neighbors_list
         .iter()
         .zip(pdists.iter())
         .map(|(nearest_neighbors, pdist)| calc_plof(nearest_neighbors, *pdist, &pdists))
-        .collect::<Array1<_>>();
+        .collect::<Vec<T>>();
 
     // Aggregate the Probabilistic Outlier Factor (nPLOF)
     let nplof = calc_nplof(&plofs, lambda_float);
 
     // Calculate the local outlier probability
-    let local_outlier_prob =
-        (plofs / (nplof * two_squared.sqrt())).map(|x| erf_approx(*x).max(T::zero()));
+    let local_outlier_prob = plofs
+        .iter()
+        .map(|x| erf_approx(*x / (nplof * two_squared.sqrt())).max(T::zero()))
+        .collect::<Vec<T>>();
 
     Ok(local_outlier_prob)
 }
@@ -158,7 +246,7 @@ where
 ///
 fn calc_sigma<T>(neighbors: &[(T, &usize)], k: T) -> T
 where
-    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
+    T: Float + FloatConst + AddAssign + Sum + Debug,
 {
     (neighbors.iter().map(|(dist, _)| dist.powi(2)).sum::<T>() / k).sqrt()
 }
@@ -170,9 +258,9 @@ where
 /// * `pdist` - Probabilistic distance of the point
 /// * `pdists` - Probabilistic distance of the points
 ///
-fn calc_plof<T>(nearest_neighbors: &[(T, &usize)], pdist: T, pdists: &Array1<T>) -> T
+fn calc_plof<T>(nearest_neighbors: &[(T, &usize)], pdist: T, pdists: &[T]) -> T
 where
-    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
+    T: Float + FloatConst + AddAssign + Sum + Debug,
 {
     let nn_mean = nearest_neighbors
         .iter()
@@ -188,9 +276,9 @@ where
 /// # Arguments
 /// * `plofs` - Array of PLOF values
 ///
-fn calc_nplof<T>(plofs: &Array1<T>, lambda: T) -> T
+fn calc_nplof<T>(plofs: &[T], lambda: T) -> T
 where
-    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
+    T: Float + FloatConst + AddAssign + Sum + Debug,
 {
     let plofs_squared_mean =
         plofs.iter().map(|x| x.powi(2)).sum::<T>() / T::from(plofs.len()).unwrap();
@@ -208,7 +296,7 @@ where
 ///
 fn erf_approx<T>(x: T) -> T
 where
-    T: Float + FloatConst + ScalarOperand + AddAssign + Sum + Debug,
+    T: Float + FloatConst + AddAssign + Sum + Debug,
 {
     T::one()
         - T::one()
@@ -225,6 +313,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use ndarray::Array1;
     use ndarray_stats::DeviationExt;
     use polars::prelude::*;
 
@@ -252,8 +341,14 @@ mod tests {
         // The data is expected to be in contiguous memory therefore we use the C-order
         let array = feature_df.to_ndarray::<Float64Type>(IndexOrder::C).unwrap();
 
+        // Convert the 2D array into nested Vecs, the input type expected by `local_outlier_probabilities`
+        let points = array
+            .outer_iter()
+            .map(|row| row.to_vec())
+            .collect::<Vec<Vec<f64>>>();
+
         // Calculate the local outlier probabilities
-        let loop_score = local_outlier_probabilities(array, 1000, 3, None).unwrap();
+        let loop_score = local_outlier_probabilities(&points, 1000, 3, None).unwrap();
 
         assert_eq!(loop_score.len(), df.height());
 
@@ -265,7 +360,9 @@ mod tests {
             .into_no_null_iter()
             .collect::<Array1<_>>();
 
-        let rmse = loop_score.root_mean_sq_err(&loop_score_py).unwrap();
+        let rmse = Array1::from(loop_score)
+            .root_mean_sq_err(&loop_score_py)
+            .unwrap();
 
         // RMSE under 0.02 should be good enough
         assert!(rmse < 0.02, "RMSE > 0.02");
