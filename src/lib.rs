@@ -10,6 +10,8 @@ use std::ops::AddAssign;
 
 use kdtree::KdTree;
 use num_traits::{Float, FloatConst};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use crate::error::Error;
 
@@ -138,6 +140,10 @@ where
 /// * `lambda` - Scaling factor for the probabilistic set distance & Probabilistic Local Outlier (PLod)
 /// * `distance_fn` - Optional distance function to use (default is Manhattan distance)
 ///
+/// With the (default-on) `parallel` feature enabled, the per-point neighbor queries and PLOF
+/// calculations run on a rayon thread pool. Disabling the feature (`--no-default-features`)
+/// drops the `rayon` dependency entirely and runs both loops sequentially.
+///
 pub fn local_outlier_probabilities<T, S>(
     data: &S,
     k: usize,
@@ -145,7 +151,7 @@ pub fn local_outlier_probabilities<T, S>(
     distance_fn: Option<DistanceFn<T>>,
 ) -> Result<Vec<T>, Error>
 where
-    T: Float + FloatConst + AddAssign + Sum + Debug,
+    T: Float + FloatConst + AddAssign + Sum + Debug + Send + Sync,
     S: PointSource<T> + ?Sized,
 {
     // Unwrap the distance function or use the default
@@ -181,16 +187,16 @@ where
     // compute sigma, so we never store a (distance, index) pair per neighbor - only the index
     // survives, which the PLOF step below needs to look up other points' pdists. The tree itself
     // is dropped at the end of this block since nothing after it needs the point coordinates.
-    let (pdists, neighbor_indices) = {
+    // The per-point queries are independent (each only reads the already-built, shared tree), so
+    // with the `parallel` feature they run on a rayon thread pool; results are collected back in
+    // point order either way.
+    let (pdists, neighbor_indices): (Vec<T>, Vec<Vec<usize>>) = {
         let mut tree = KdTree::new(dim);
         for (idx, point) in points.iter().enumerate() {
             tree.add(point.as_ref(), idx)?;
         }
 
-        let mut pdists = Vec::with_capacity(points.len());
-        let mut neighbor_indices = Vec::with_capacity(points.len());
-
-        for (point_idx, point) in points.iter().enumerate() {
+        let query = |point_idx: usize, point: &Cow<'_, [T]>| -> Result<(T, Vec<usize>), Error> {
             // kdtree::nearest includes the point itself, so we query k + 1 and filter it out below
             let neighbors = tree.nearest(point.as_ref(), k + 1, &distance_fn)?;
 
@@ -204,18 +210,39 @@ where
                 indices.push(*idx);
             }
 
-            pdists.push((sum_sq / k_float).sqrt() * lambda_float);
-            neighbor_indices.push(indices);
-        }
+            Ok(((sum_sq / k_float).sqrt() * lambda_float, indices))
+        };
 
-        (pdists, neighbor_indices)
+        #[cfg(feature = "parallel")]
+        let results = points
+            .par_iter()
+            .enumerate()
+            .map(|(point_idx, point)| query(point_idx, point))
+            .collect::<Result<Vec<_>, Error>>()?;
+        #[cfg(not(feature = "parallel"))]
+        let results = points
+            .iter()
+            .enumerate()
+            .map(|(point_idx, point)| query(point_idx, point))
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        results.into_iter().unzip()
     };
 
     // Calculate the Probabilistic Outlier Factor for each point
+    let plof_for = |(indices, pdist): (&Vec<usize>, &T)| calc_plof(indices, *pdist, &pdists);
+
+    #[cfg(feature = "parallel")]
+    let plofs = neighbor_indices
+        .par_iter()
+        .zip(pdists.par_iter())
+        .map(plof_for)
+        .collect::<Vec<T>>();
+    #[cfg(not(feature = "parallel"))]
     let plofs = neighbor_indices
         .iter()
         .zip(pdists.iter())
-        .map(|(indices, pdist)| calc_plof(indices, *pdist, &pdists))
+        .map(plof_for)
         .collect::<Vec<T>>();
 
     // Aggregate the Probabilistic Outlier Factor (nPLOF)
