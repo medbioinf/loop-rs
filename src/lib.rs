@@ -171,59 +171,51 @@ where
         }
     }
 
-    // Build the KDTree for finding nearest neighbors
-    let mut tree = KdTree::new(dim);
-
-    // Get an array of references to the underlying points and add them to the KDTree.
-    // This should safe some memory on larger features arrays
-    let point_refs = points
-        .iter()
-        .map(|point| point.as_ref())
-        .collect::<Vec<_>>();
-
-    for (idx, point) in point_refs.iter().enumerate() {
-        tree.add(*point, idx)?;
-    }
-
-    // Build the neighbor list. We need to manually remove the queried point from the list of neighbors
-    // therefore the map()-part is a bit more complicated and we increase the `k by 1
-    let neighbors_list = point_refs
-        .iter()
-        .enumerate()
-        .map(|(point_idx, point)| {
-            match tree.nearest(point, k + 1, &distance_fn) {
-                Ok(neighbors) => {
-                    // kdtree::nearest includes the point itself, so we need to add 1 to k and remove the point
-                    let filtered = neighbors
-                        .into_iter()
-                        .filter(|neighbor| {
-                            // filter out the point itself
-                            *neighbor.1 != point_idx
-                        })
-                        .collect::<Vec<_>>();
-                    Ok(filtered)
-                }
-                Err(err) => Err(Error::KdTreeError(err)),
-            }
-        })
-        .collect::<Result<Vec<Vec<(T, &usize)>>, Error>>()?;
-
-    // Let's prepare some to Floats to work with
+    // Let's prepare some Floats to work with
     let k_float = T::from(k).ok_or(Error::CastingError("k".to_string()))?;
     let lambda_float = T::from(lambda).ok_or(Error::CastingError("lambda".to_string()))?;
     let two_squared = T::from(2.0).ok_or(Error::CastingError("2.0".to_string()))?;
 
-    // Calculate the probabilistic distance for each point
-    let pdists = neighbors_list
-        .iter()
-        .map(|neighbors| calc_sigma(neighbors, k_float) * lambda_float)
-        .collect::<Vec<T>>();
+    // Build the KDTree, then for every point derive its probabilistic distance (pdist) and the
+    // indices of its k nearest neighbors in one pass. Distances are only needed transiently to
+    // compute sigma, so we never store a (distance, index) pair per neighbor - only the index
+    // survives, which the PLOF step below needs to look up other points' pdists. The tree itself
+    // is dropped at the end of this block since nothing after it needs the point coordinates.
+    let (pdists, neighbor_indices) = {
+        let mut tree = KdTree::new(dim);
+        for (idx, point) in points.iter().enumerate() {
+            tree.add(point.as_ref(), idx)?;
+        }
+
+        let mut pdists = Vec::with_capacity(points.len());
+        let mut neighbor_indices = Vec::with_capacity(points.len());
+
+        for (point_idx, point) in points.iter().enumerate() {
+            // kdtree::nearest includes the point itself, so we query k + 1 and filter it out below
+            let neighbors = tree.nearest(point.as_ref(), k + 1, &distance_fn)?;
+
+            let mut sum_sq = T::zero();
+            let mut indices = Vec::with_capacity(k);
+            for (dist, idx) in neighbors {
+                if *idx == point_idx {
+                    continue;
+                }
+                sum_sq += dist.powi(2);
+                indices.push(*idx);
+            }
+
+            pdists.push((sum_sq / k_float).sqrt() * lambda_float);
+            neighbor_indices.push(indices);
+        }
+
+        (pdists, neighbor_indices)
+    };
 
     // Calculate the Probabilistic Outlier Factor for each point
-    let plofs = neighbors_list
+    let plofs = neighbor_indices
         .iter()
         .zip(pdists.iter())
-        .map(|(nearest_neighbors, pdist)| calc_plof(nearest_neighbors, *pdist, &pdists))
+        .map(|(indices, pdist)| calc_plof(indices, *pdist, &pdists))
         .collect::<Vec<T>>();
 
     // Aggregate the Probabilistic Outlier Factor (nPLOF)
@@ -238,35 +230,19 @@ where
     Ok(local_outlier_prob)
 }
 
-/// Calculate the sigma used in the probabilistic distance function
-///
-/// # Arguments
-/// * `neighbors` - A slice of tuples containing the distance and index of the neighbors
-/// * `k` - Number of neighbors to consider
-///
-fn calc_sigma<T>(neighbors: &[(T, &usize)], k: T) -> T
-where
-    T: Float + FloatConst + AddAssign + Sum + Debug,
-{
-    (neighbors.iter().map(|(dist, _)| dist.powi(2)).sum::<T>() / k).sqrt()
-}
-
 /// Probabilistic Outlier Factor (PLOF) for a point
 ///
 /// # Arguments
-/// * `neighbors` - A slice of tuples containing the distance and index of the neighbors
+/// * `neighbor_indices` - Indices of the point's k nearest neighbors
 /// * `pdist` - Probabilistic distance of the point
 /// * `pdists` - Probabilistic distance of the points
 ///
-fn calc_plof<T>(nearest_neighbors: &[(T, &usize)], pdist: T, pdists: &[T]) -> T
+fn calc_plof<T>(neighbor_indices: &[usize], pdist: T, pdists: &[T]) -> T
 where
     T: Float + FloatConst + AddAssign + Sum + Debug,
 {
-    let nn_mean = nearest_neighbors
-        .iter()
-        .map(|(_, idx)| pdists[**idx])
-        .sum::<T>()
-        / T::from(nearest_neighbors.len()).unwrap();
+    let nn_mean = neighbor_indices.iter().map(|idx| pdists[*idx]).sum::<T>()
+        / T::from(neighbor_indices.len()).unwrap();
 
     pdist / nn_mean - T::one()
 }
