@@ -185,12 +185,14 @@ where
     // Build the KDTree, then for every point derive its probabilistic distance (pdist) and the
     // indices of its k nearest neighbors in one pass. Distances are only needed transiently to
     // compute sigma, so we never store a (distance, index) pair per neighbor - only the index
-    // survives, which the PLOF step below needs to look up other points' pdists. The tree itself
-    // is dropped at the end of this block since nothing after it needs the point coordinates.
+    // survives, which the PLOF step below needs to look up other points' pdists. The tree and
+    // `points` are both dropped at the end of this block since nothing after it needs the point
+    // coordinates - this matters for `PointSource` impls that had to gather (rather than borrow)
+    // their data, where `points` can be a full extra N*dim copy.
     // The per-point queries are independent (each only reads the already-built, shared tree), so
     // with the `parallel` feature they run on a rayon thread pool; results are collected back in
     // point order either way.
-    let (pdists, neighbor_indices): (Vec<T>, Vec<Vec<usize>>) = {
+    let (pdists, neighbor_indices_flat): (Vec<T>, Vec<usize>) = {
         let mut tree = KdTree::new(dim);
         for (idx, point) in points.iter().enumerate() {
             tree.add(point.as_ref(), idx)?;
@@ -226,21 +228,35 @@ where
             .map(|(point_idx, point)| query(point_idx, point))
             .collect::<Result<Vec<_>, Error>>()?;
 
-        results.into_iter().unzip()
+        // Each point always has exactly k neighbors (the point itself is always its own nearest
+        // neighbor, so filtering it out of the k + 1 results above always leaves k), so the
+        // per-point index lists can be flattened into one contiguous, fixed-stride buffer instead
+        // of N separately-allocated Vecs - one allocation instead of N, and the k-length rows sit
+        // next to each other in memory for the PLOF pass below.
+        let mut pdists = Vec::with_capacity(results.len());
+        let mut neighbor_indices_flat = Vec::with_capacity(results.len() * k);
+        for (pdist, indices) in results {
+            pdists.push(pdist);
+            neighbor_indices_flat.extend_from_slice(&indices);
+        }
+        (pdists, neighbor_indices_flat)
     };
+    // Free the (possibly gathered, owned) point coordinates now - only pdists and
+    // neighbor_indices_flat are needed from here on.
+    drop(points);
 
     // Calculate the Probabilistic Outlier Factor for each point
-    let plof_for = |(indices, pdist): (&Vec<usize>, &T)| calc_plof(indices, *pdist, &pdists);
+    let plof_for = |(indices, pdist): (&[usize], &T)| calc_plof(indices, *pdist, &pdists);
 
     #[cfg(feature = "parallel")]
-    let plofs = neighbor_indices
-        .par_iter()
+    let plofs = neighbor_indices_flat
+        .par_chunks(k)
         .zip(pdists.par_iter())
         .map(plof_for)
         .collect::<Vec<T>>();
     #[cfg(not(feature = "parallel"))]
-    let plofs = neighbor_indices
-        .iter()
+    let plofs = neighbor_indices_flat
+        .chunks(k)
         .zip(pdists.iter())
         .map(plof_for)
         .collect::<Vec<T>>();
